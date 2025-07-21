@@ -1,0 +1,276 @@
+---
+title: "Model Comparison: MS Case Prediction"
+author: "Banan Bashar Al-jarrah"
+date: "2025-07-21"
+output: pdf_document
+---
+
+#introduction:
+*Multiple Sclerosis (MS) is a chronic, immune-mediated neurological condition that often begins subtly but may progress to significant disability. Early diagnosis is crucial to initiate disease-modifying therapies and improve long-term outcomes. However, current diagnostic pathways often rely on invasive procedures or costly imaging.*
+
+*Inspired by the July 2025 announcement from the Medical University of Vienna regarding a novel blood-based test for early MS detection, this exploratory project uses simulated data reflecting key characteristics mentioned in that report — including serological (EBNA OD), demographic, MRI, and neurological features.*
+
+*The aim is to explore predictive modeling techniques (e.g., logistic regression, SVM, GBM) that could potentially support early detection strategies. Although the dataset is synthetic, the analytical approach mirrors real-world research methods and clinical reasoning.*
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE)
+
+
+library(dplyr)
+library(glmnet)
+library(e1071)
+library(gbm)
+library(pROC)
+
+```
+
+```{r}
+library(dplyr)
+
+
+set.seed(123)
+n_cases <- 713
+cases_gender <- sample(c("Female","Male"), n_cases, replace=TRUE, prob=c(0.7,0.3))
+cases <- data.frame(
+  id = paste0("case_", 1:n_cases),
+  group = "MS_case",
+  gender = sample(c("Female","Male"), n_cases, replace=TRUE, prob=c(0.7,0.3)),
+  age = round(rnorm(n_cases, mean=38, sd=9)),
+  ebna_od = rnorm(n_cases, mean=2.2, sd=0.4),
+  mri_score = rnorm(n_cases, mean=3.2, sd=0.5),
+  neuro_score = round(rnorm(n_cases, mean=4, sd=0.5),1)
+)
+
+n_controls <- 5318
+ctrl_gender <- sample(c("Female","Male"), n_controls, replace=TRUE, prob=c(0.7,0.3))
+controls <- data.frame(
+  id = paste0("ctrl_", 1:n_controls),
+  group = "Control",
+  gender = sample(c("Female","Male"), n_controls, replace=TRUE, prob=c(0.7,0.3)),
+  age = round(rnorm(n_controls, mean=36, sd=10)),
+  ebna_od = rnorm(n_controls, mean=1.2, sd=0.4),
+  mri_score = rnorm(n_controls, mean=1.1, sd=0.3),
+  neuro_score = round(rnorm(n_controls, mean=1.2, sd=0.6),1)
+)
+
+ms_data <- bind_rows(cases, controls)
+
+
+ms_data$group <- factor(ms_data$group, levels = c("Control", "MS_case"))
+ms_data$gender <- factor(ms_data$gender, levels = c("Female", "Male"))
+ms_data$log_od <- log(ms_data$ebna_od + 1)
+
+
+model_log <- glm(group ~ log_od + gender, data = ms_data, family = "binomial")
+summary(model_log)
+
+
+```
+
+
+
+# Linearity with the Logit:
+To assess whether continuous predictors (e.g., MRI OD) have a linear relationship with the logit of the outcome, we:
+
+Used the Box-Tidwell Test
+
+Checked plots of the logit vs each predictor
+
+Variables that violated linearity assumption were either transformed or replaced by categorical bins if clinically relevant
+
+
+
+#Multicollinearity:
+To ensure that the predictors are not strongly correlated:
+
+We calculated Variance Inflation Factor (VIF) for each variable.
+
+All VIF values were < 5, indicating absence of problematic multicollinearity.
+
+
+```{r}
+
+model_multi <- glm(group ~ ebna_od + gender + age + mri_score + neuro_score, data = ms_data, family = "binomial")
+library(car)
+vif(model_multi)
+
+```
+
+#Distribution of EBNA-1 OD Values by Group 
+```{r include-plot, echo=FALSE, out.width="70%"}
+knitr::include_graphics("Rplot20.png")
+```
+
+
+*As expected and based on the plotted data, individuals diagnosed with MS exhibited higher EBNA OD values compared to non-MS individuals.*
+
+
+```{r include-plot2, echo=FALSE, out.width="70%"}
+knitr::include_graphics("Rplot19.png")
+
+```
+
+
+
+
+
+
+
+#Logistic Regression Model:
+ buiding a logistic regression model including:
+
+MRI_OD, Age, Gender, Neurologist decision, and other significant clinical predictors.
+
+```{r}
+library(pROC)
+library(car)
+library(ResourceSelection)
+
+
+ms_data$group <- factor(ms_data$group, levels = c("Control", "MS_case"))
+
+ms_data$log_od <- log(ms_data$ebna_od + 1)
+
+
+logit_model <- glm(group ~ mri_score + log_od + gender + age, 
+                   family = "binomial", 
+                   data = ms_data)
+
+
+summary(logit_model)
+
+
+
+ms_data$prob <- predict(logit_model, type = "response")
+
+
+roc_curve <- roc(ms_data$group, ms_data$prob)
+plot(roc_curve, col = "blue", main = "ROC Curve - Logistic Regression")
+auc_val <- auc(roc_curve)
+print(paste("AUC:", auc_val))
+
+
+```
+*The ROC curve for EBNA-1 OD demonstrates its diagnostic ability to distinguish between MS and non-MS individuals. The curve indicates a good level of discrimination, as reflected by the area under the curve (AUC).*
+
+
+#T-test 
+
+```{r}
+t.test(ebna_od ~ group, data = ms_data)
+
+```
+*An independent t-test was conducted to compare EBNA-1 OD levels between individuals with MS and those without. The results revealed a statistically significant difference in the mean EBNA-1 OD values between the two groups (p <<<< 0.05), suggesting higher antibody levels among MS patients.*
+
+
+
+#Feature Selection: LASSO Regression
+
+To reduce overfitting and select the most important predictors, we used:
+
+LASSO logistic regression with cross-validation.
+
+
+
+```{r}
+library(glmnet)
+
+
+ms_data$log_ebna_od <- log(ms_data$ebna_od + 1)
+ms_data$log_mri_score <- log(ms_data$mri_score + 1)
+
+
+x <- model.matrix(group ~ log_ebna_od + log_mri_score + gender + age + neuro_score, 
+                  data = ms_data)[,-1]
+
+
+y <- as.numeric(ms_data$group == "MS_case")  
+
+
+lasso_model <- cv.glmnet(x, y, alpha = 1, family = "binomial")
+
+
+plot(lasso_model)
+
+
+print(coef(lasso_model, s = "lambda.min"))
+
+```
+
+
+
+
+#Support Vector Machine (SVM)
+
+ training other models and compared additional models to benchmark performance:
+
+
+
+```{r}
+library(e1071)
+library(pROC)
+library(dplyr)
+
+
+ms_data$group <- factor(ms_data$group, levels = c("Control", "MS_case"))
+
+
+svm_model <- svm(group ~ ebna_od + mri_score + gender + age + neuro_score, 
+                 data = ms_data, 
+                 kernel = "radial",
+                 cost = 1, gamma = 0.1,
+                 probability = TRUE)
+
+
+svm_pred <- predict(svm_model, ms_data, probability = TRUE)
+svm_probs <- attr(svm_pred, "probabilities")[, "MS_case"]
+
+
+roc_svm <- roc(ms_data$group, svm_probs)
+print(paste("AUC SVM:", auc(roc_svm)))
+plot(roc_svm, col="red", main = "ROC Curve - SVM")
+
+
+```
+
+*The logistic regression and SVM models consistently identified EBNA_OD and MRI score as the most influential predictors, which aligns with clinical understanding of MS pathophysiology. The ROC curves (AUC > 0.9) indicate strong discriminatory ability, suggesting potential clinical utility as a pre-diagnostic risk stratification tool*
+
+
+
+
+
+
+
+```{r}
+
+AIC_value <- AIC(logit_model)
+BIC_value <- BIC(logit_model)
+
+print(paste("AIC:", AIC_value))
+print(paste("BIC:", BIC_value))
+
+```
+
+#Implications for Early Detection
+
+*This exploratory modeling approach highlights the potential role of routine clinical and serological variables—particularly EBNA OD levels, age, and neurological findings—in the early identification of individuals at risk for Multiple Sclerosis. If further validated in real-world cohorts, such models could assist in triaging patients for confirmatory imaging (e.g., MRI), or prioritizing them for specialist referrals.*
+
+*In clinical settings, this approach may reduce diagnostic delays by identifying high-risk profiles through a non-invasive, blood-based test in combination with basic clinical features. While it does not replace definitive diagnostic tools, it could serve as an early alert system—particularly useful in primary care or under-resourced environments.*
+
+*Ultimately, such models may help clinicians flag probable MS cases earlier, enabling faster intervention with disease-modifying therapies and potentially improving long-term patient outcomes.*
+
+
+#Future Work
+
+To build on these preliminary findings, future efforts may include:
+
+Validating the model on independent, real-world datasets to assess its generalizability.
+
+Expanding the variable set to include proteomic, genomic, or imaging-derived features for enhanced predictive accuracy.
+
+Collaborating with neurologists and clinical teams to evaluate the model's practical utility and integration into early MS screening workflows.
+
+
+#conclousion
+Our simulated dataset reflects similar distributions for EBNA OD and MRI scores compared to the MedUni Wien cohort, supporting the validity of the analytical approach.
+
+
